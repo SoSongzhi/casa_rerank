@@ -1,0 +1,41 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Model files (too large for GitHub)
+*.ckpt
+*.pth
+*.pt
+*.pkl
+
+# Results and logs
+high_nine_results_efficient/
+*.log
+*.mztab
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.backup
+*.broken
+
+# Environment files
+.env
+venv/
+env/
+
+# Jupyter notebooks
+.ipynb_checkpoints
+
+# Test data (if too large)
+test_data/
