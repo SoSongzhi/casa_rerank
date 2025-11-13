@@ -1,0 +1,118 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10, 3.11]
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov flake8
+    
+    - name: Lint with flake8
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Test import functionality
+      run: |
+        python -c "import casanovo_predictor; print('✓ casanovo_predictor imported successfully')"
+        python -c "import efficient_reranker; print('✓ efficient_reranker imported successfully')"
+        python -c "import build_efficient_index; print('✓ build_efficient_index imported successfully')"
+    
+    - name: Check configuration files
+      run: |
+        python -c "import yaml; yaml.safe_load(open('beam50.yaml')); print('✓ beam50.yaml is valid')"
+        python -c "import yaml; yaml.safe_load(open('casanovo/config.yaml')); print('✓ casanovo/config.yaml is valid')"
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run security scan
+      run: |
+        pip install bandit safety
+        bandit -r . -f json -o bandit-report.json || true
+        safety check --json --output safety-report.json || true
+    
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          safety-report.json
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check documentation
+      run: |
+        # Check if README exists and has content
+        if [ -f README.md ]; then
+          echo "✓ README.md exists"
+          if [ $(wc -l < README.md) -gt 10 ]; then
+            echo "✓ README.md has sufficient content"
+          else
+            echo "⚠ README.md might need more content"
+          fi
+        else
+          echo "❌ README.md not found"
+          exit 1
+        fi
+        
+        # Check if requirements.txt exists
+        if [ -f requirements.txt ]; then
+          echo "✓ requirements.txt exists"
+        else
+          echo "❌ requirements.txt not found"
+          exit 1
+        fi
+
+  deploy-docs:
+    needs: [test, security, docs]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./
+        publish_branch: gh-pages
+        keep_files: true
+        allow_empty_commit: false
