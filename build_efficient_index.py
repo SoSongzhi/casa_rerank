@@ -23,9 +23,11 @@ class EfficientIndexBuilder:
         pass
 
     def normalize_peptide(self, peptide):
-        """标准化肽段序列（去除修饰符号和前缀）"""
+        """标准化肽段序列（去除修饰符号和前缀，并将L转换为I）"""
         clean_seq = re.sub(r'\[.*?\]', '', peptide)
         clean_seq = re.sub(r'^[\[\]A-Za-z0-9\-\+\.]+\-', '', clean_seq)
+        # 将L转换为I（亮氨酸和异亮氨酸在质谱中无法区分）
+        clean_seq = clean_seq.replace('L', 'I')
         return clean_seq
 
     def extract_sequence(self, spectrum):
