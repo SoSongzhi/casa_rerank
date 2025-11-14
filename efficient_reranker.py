@@ -22,6 +22,7 @@ from pyteomics import mgf, mass
 
 from casanovo.denovo.model import Spec2Pep
 from casanovo.config import Config
+from progressive_beam_search import ProgressiveBeamSpec2Pep
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
@@ -30,7 +31,24 @@ logger = logging.getLogger(__name__)
 class EfficientReranker:
     """使用预计算索引的高效重排序器"""
 
-    def __init__(self, model_path=None, config_path=None, koina_url="https://koina.wilhelmlab.org"):
+    def __init__(self, model_path=None, config_path=None, koina_url="https://koina.wilhelmlab.org", use_progressive_beam=False, beam_schedule=None):
+        """
+        初始化重排序器
+
+        Parameters:
+        -----------
+        model_path : str, optional
+            模型checkpoint路径
+        config_path : str, optional
+            配置文件路径
+        koina_url : str
+            Koina服务器URL
+        use_progressive_beam : bool
+            是否使用渐进式Beam Search（默认False）
+        beam_schedule : dict, optional
+            渐进beam演化策略，如 {0: 5, 1: 25, 2: 125, 3: 100}
+            仅在 use_progressive_beam=True 时有效
+        """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Device: {self.device}")
 
@@ -45,7 +63,30 @@ class EfficientReranker:
                 model_path = str(model_files[0])
 
         logger.info(f"Loading model: {model_path}")
-        self.model = Spec2Pep.load_from_checkpoint(model_path, map_location=self.device)
+
+        if use_progressive_beam:
+            # 使用渐进式Beam Search模型
+            base_model = Spec2Pep.load_from_checkpoint(model_path, map_location=self.device)
+
+            if beam_schedule is None:
+                beam_schedule = {0: 5, 1: 25, 2: 125, 3: 100}
+
+            max_beam = max(beam_schedule.values())
+            hparams = dict(base_model.hparams)
+            hparams['top_match'] = max_beam
+            hparams['n_beams'] = beam_schedule[0]
+
+            self.model = ProgressiveBeamSpec2Pep(
+                **hparams,
+                beam_schedule=beam_schedule
+            )
+            self.model.load_state_dict(base_model.state_dict(), strict=False)
+            logger.info(f"Progressive Beam Search enabled: {beam_schedule}")
+        else:
+            # 使用标准Beam Search模型
+            self.model = Spec2Pep.load_from_checkpoint(model_path, map_location=self.device)
+            logger.info("Standard Beam Search mode")
+
         self.model.eval()
         self.model.to(self.device)
 
@@ -347,8 +388,53 @@ class EfficientReranker:
                 })
 
         # 3. 按相似度排序
-        results_df = pd.DataFrame(results)
-        results_df = results_df.sort_values('similarity', ascending=False).reset_index(drop=True)
-        results_df['rerank'] = range(1, len(results_df) + 1)
+        try:
+            results_df = pd.DataFrame(results)
+            if len(results_df) == 0:
+                # 如果没有结果，返回空字典
+                return {
+                    'peptide': '',
+                    'similarity': -1.0,
+                    'denovo_score': 0.0,
+                    'rerank': -1,
+                    'source': 'NoResults'
+                }
+            
+            # 确保similarity列是数值类型
+            results_df['similarity'] = pd.to_numeric(results_df['similarity'], errors='coerce')
+            results_df = results_df.sort_values('similarity', ascending=False).reset_index(drop=True)
+            results_df['rerank'] = range(1, len(results_df) + 1)
 
-        return results_df
+            # 返回最高相似度的结果（字典格式）
+            if len(results_df) > 0:
+                top_result = results_df.iloc[0].to_dict()
+                return top_result
+            else:
+                return {
+                    'peptide': '',
+                    'similarity': -1.0,
+                    'denovo_score': 0.0,
+                    'rerank': -1,
+                    'source': 'EmptyResults'
+                }
+                
+        except Exception as e:
+            print(f"Error in reranking results: {e}")
+            # 返回De Novo最高分候选作为备选
+            if candidates:
+                top_candidate = max(candidates, key=lambda x: x['score'])
+                return {
+                    'peptide': top_candidate['peptide'],
+                    'similarity': -1.0,
+                    'denovo_score': top_candidate['score'],
+                    'rerank': 1,
+                    'source': 'DeNovoFallback'
+                }
+            else:
+                return {
+                    'peptide': '',
+                    'similarity': -1.0,
+                    'denovo_score': 0.0,
+                    'rerank': -1,
+                    'source': 'Error'
+                }

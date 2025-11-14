@@ -21,6 +21,68 @@ class EfficientIndexBuilder:
 
     def __init__(self):
         pass
+    
+    def convert_modification_to_unimod(self, peptide: str) -> str:
+        """
+        将修饰格式转换为Unimod ID标准格式
+        用于统一database和预测结果的格式
+        
+        转换规则:
+        - M(+15.99) -> M[UNIMOD:35]
+        - C(+57.02) -> C[UNIMOD:4]
+        - N(+.98) -> N[UNIMOD:7]
+        """
+        if not peptide:
+            return peptide
+        
+        # Unimod映射
+        mod_name_to_unimod = {
+            'Oxidation': 'UNIMOD:35',
+            'Deamidated': 'UNIMOD:7',
+            'Carbamidomethyl': 'UNIMOD:4',
+            'Acetyl': 'UNIMOD:1',
+            'Carbamyl': 'UNIMOD:5',
+        }
+        
+        # 质量范围到Unimod ID
+        mass_to_unimod = [
+            (15.85, 16.15, 'UNIMOD:35'),  # Oxidation
+            (0.83, 1.13, 'UNIMOD:7'),     # Deamidation
+            (56.87, 57.17, 'UNIMOD:4'),   # Carbamidomethyl
+            (41.86, 42.16, 'UNIMOD:1'),   # Acetyl
+            (42.86, 43.16, 'UNIMOD:5'),   # Carbamyl
+        ]
+        
+        converted = peptide
+        
+        # 处理命名修饰
+        for mod_name, unimod_id in mod_name_to_unimod.items():
+            converted = converted.replace(f'[{mod_name}]', f'[{unimod_id}]')
+        
+        # 处理数值修饰 (支持圆括号和方括号)
+        pattern = r'[\[\(]([+\-]?\d*\.?\d+)[\]\)]'
+        
+        def replace_numeric_mod(match):
+            mass_str = match.group(1)
+            try:
+                mass_val = float(mass_str)
+                
+                # 查找匹配的Unimod ID
+                for min_mass, max_mass, unimod_id in mass_to_unimod:
+                    if min_mass <= mass_val <= max_mass:
+                        return f'[{unimod_id}]'
+                
+                # 未知修饰，保留质量
+                if mass_val >= 0:
+                    return f'[+{mass_val:.6f}]'
+                else:
+                    return f'[{mass_val:.6f}]'
+                    
+            except ValueError:
+                return f'[{mass_str}]'
+        
+        converted = re.sub(pattern, replace_numeric_mod, converted)
+        return converted
 
     def normalize_peptide(self, peptide):
         """标准化肽段序列（去除修饰符号和前缀，并将L转换为I）"""
@@ -41,7 +103,7 @@ class EfficientIndexBuilder:
 
     def build_index(self, reference_mgf):
         """
-        构建高效索引
+        构建高效索引（带Unimod格式转换）
 
         索引结构:
         {
@@ -53,7 +115,8 @@ class EfficientIndexBuilder:
                         "precursor_mz": 500.25,
                         "charge": 2,
                         "index": 0,
-                        "raw_seq": "PEPTIDE"  # 保留原始序列
+                        "raw_seq": "PEPTIDE",  # 原始序列
+                        "unimod_seq": "PEPTIDE[UNIMOD:4]"  # Unimod格式
                     },
                     ...
                 ]
@@ -61,12 +124,13 @@ class EfficientIndexBuilder:
         }
         """
         print("="*70)
-        print("Building Efficient Spectrum Index")
+        print("Building Efficient Spectrum Index with Unimod Conversion")
         print("="*70)
         print(f"Reference MGF: {reference_mgf}")
 
         index = defaultdict(lambda: {"spectra": []})
         total_spectra = 0
+        converted_count = 0
 
         start_time = time.time()
 
@@ -77,8 +141,13 @@ class EfficientIndexBuilder:
                 if not raw_seq:
                     continue
 
+                # 转换为Unimod格式
+                unimod_seq = self.convert_modification_to_unimod(raw_seq)
+                if unimod_seq != raw_seq:
+                    converted_count += 1
+                
                 # 标准化序列（用于索引key）
-                clean_seq = self.normalize_peptide(raw_seq)
+                clean_seq = self.normalize_peptide(unimod_seq)
 
                 # 提取前体信息
                 pepmass = spectrum['params'].get('pepmass')
@@ -106,14 +175,15 @@ class EfficientIndexBuilder:
                     "precursor_mz": float(precursor_mz),
                     "charge": charge,
                     "index": idx,
-                    "raw_seq": raw_seq
+                    "raw_seq": raw_seq,
+                    "unimod_seq": unimod_seq  # 添加Unimod格式
                 }
 
                 index[clean_seq]["spectra"].append(spec_data)
                 total_spectra += 1
 
                 if (idx + 1) % 10000 == 0:
-                    print(f"  Processed {idx + 1} spectra...")
+                    print(f"  Processed {idx + 1} spectra... ({converted_count} with modifications)")
 
         elapsed = time.time() - start_time
 
@@ -124,6 +194,7 @@ class EfficientIndexBuilder:
         print(f"\n{'='*70}")
         print("Index Statistics:")
         print(f"  Total spectra: {total_spectra}")
+        print(f"  Spectra with modifications converted: {converted_count} ({converted_count/total_spectra*100:.1f}%)")
         print(f"  Unique sequences: {unique_sequences}")
         print(f"  Average spectra per sequence: {avg_spectra_per_seq:.2f}")
         print(f"  Build time: {elapsed:.1f}s")

@@ -1,0 +1,29 @@
+{
+  "total_spectra": 1000,
+  "processed_count": 19,
+  "processed_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18
+  ],
+  "start_time": "2025-11-13T11:21:12.956038",
+  "last_update": "2025-11-13T11:33:14.256339",
+  "total_denovo_time": 363.83287930488586,
+  "total_rerank_time": 0.0
+}
