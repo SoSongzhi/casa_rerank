@@ -101,6 +101,159 @@ class EfficientReranker:
         # 将L转换为I（亮氨酸和异亮氨酸在质谱中无法区分）
         clean_seq = clean_seq.replace('L', 'I')
         return clean_seq
+    
+    def calculate_peptide_mass_with_mods(self, peptide, charge=1):
+        """
+        计算带修饰的肽段质量
+        
+        支持格式:
+        - UNIMOD格式: M[UNIMOD:35]PEPTIDE
+        - 质量格式: M[+15.994915]PEPTIDE
+        - 圆括号格式: M(+15.99)PEPTIDE 或 NMN(+.98)R (修饰在前一个氨基酸)
+        
+        Returns:
+        --------
+        precursor_mz : float
+            前体离子的m/z值
+        """
+        # Unimod ID到质量的映射
+        unimod_masses = {
+            'UNIMOD:35': 15.994915,   # Oxidation (M)
+            'UNIMOD:4': 57.021464,    # Carbamidomethyl (C)
+            'UNIMOD:7': 0.984016,     # Deamidation (N/Q)
+            'UNIMOD:1': 42.010565,    # Acetyl (N-term)
+            'UNIMOD:5': 43.005814,    # Carbamyl (N-term)
+            'UNIMOD:28': -17.026549,  # Gln->pyro-Glu (Q)
+            'UNIMOD:27': -18.010565,  # Glu->pyro-Glu (E)
+            'UNIMOD:385': -17.026549, # Ammonia-loss (N-term)
+            'UNIMOD:21': 79.966331,   # Phospho (S/T/Y)
+            'UNIMOD:34': 14.015650,   # Methyl
+        }
+        
+        # 提取氨基酸序列和修饰
+        total_mod_mass = 0.0
+        clean_seq = ""
+        
+        i = 0
+        while i < len(peptide):
+            if peptide[i] in '[(':
+                # 找到修饰的结束位置
+                end_char = ']' if peptide[i] == '[' else ')'
+                end = peptide.find(end_char, i)
+                if end == -1:
+                    break
+                
+                mod_str = peptide[i+1:end]
+                
+                # 解析修饰
+                if mod_str.startswith('UNIMOD:'):
+                    # UNIMOD格式
+                    if mod_str in unimod_masses:
+                        total_mod_mass += unimod_masses[mod_str]
+                    else:
+                        logger.warning(f"Unknown UNIMOD: {mod_str}")
+                else:
+                    # 数值格式: +15.994915 或 15.994915 或 +.98
+                    try:
+                        mod_mass = float(mod_str.replace('+', ''))
+                        total_mod_mass += mod_mass
+                    except ValueError:
+                        logger.warning(f"Cannot parse modification: {mod_str}")
+                
+                i = end + 1
+            else:
+                # 普通氨基酸
+                if peptide[i].isalpha():
+                    clean_seq += peptide[i]
+                i += 1
+        
+        # 计算基础肽段质量（不含修饰）
+        try:
+            base_mass = mass.calculate_mass(sequence=clean_seq, charge=0)
+            # 加上修饰质量
+            total_mass = base_mass + total_mod_mass
+            # 计算m/z
+            precursor_mz = (total_mass + charge * 1.007276) / charge
+            return precursor_mz
+        except Exception as e:
+            logger.warning(f"Failed to calculate mass for {peptide}: {e}")
+            # 降级到不含修饰的计算
+            return mass.calculate_mass(sequence=clean_seq, charge=charge)
+    
+    def calculate_fragment_mass_with_mods(self, fragment_seq, ion_type='b', charge=1):
+        """
+        计算带修饰的碎片离子质量
+        
+        Parameters:
+        -----------
+        fragment_seq : str
+            碎片序列（可能包含修饰），支持 M[UNIMOD:35] 或 M(+15.99) 格式
+        ion_type : str
+            离子类型 ('b' 或 'y')
+        charge : int
+            电荷态
+        
+        Returns:
+        --------
+        mz : float
+            碎片离子的m/z值
+        """
+        # Unimod ID到质量的映射
+        unimod_masses = {
+            'UNIMOD:35': 15.994915,
+            'UNIMOD:4': 57.021464,
+            'UNIMOD:7': 0.984016,
+            'UNIMOD:1': 42.010565,
+            'UNIMOD:5': 43.005814,
+            'UNIMOD:28': -17.026549,
+            'UNIMOD:27': -18.010565,
+            'UNIMOD:385': -17.026549,
+            'UNIMOD:21': 79.966331,
+            'UNIMOD:34': 14.015650,
+        }
+        
+        # 提取氨基酸序列和修饰质量
+        total_mod_mass = 0.0
+        clean_seq = ""
+        
+        i = 0
+        while i < len(fragment_seq):
+            if fragment_seq[i] in '[(':
+                # 找到修饰的结束位置
+                end_char = ']' if fragment_seq[i] == '[' else ')'
+                end = fragment_seq.find(end_char, i)
+                if end == -1:
+                    break
+                
+                mod_str = fragment_seq[i+1:end]
+                
+                if mod_str.startswith('UNIMOD:'):
+                    if mod_str in unimod_masses:
+                        total_mod_mass += unimod_masses[mod_str]
+                else:
+                    # 数值格式: +15.994915 或 15.994915 或 +.98
+                    try:
+                        mod_mass = float(mod_str.replace('+', ''))
+                        total_mod_mass += mod_mass
+                    except ValueError:
+                        pass
+                
+                i = end + 1
+            else:
+                # 普通氨基酸
+                if fragment_seq[i].isalpha():
+                    clean_seq += fragment_seq[i]
+                i += 1
+        
+        # 计算基础碎片质量
+        try:
+            base_mz = mass.fast_mass(clean_seq, ion_type=ion_type, charge=charge)
+            # 加上修饰质量（除以电荷）
+            fragment_mz = base_mz + (total_mod_mass / charge)
+            return fragment_mz
+        except Exception as e:
+            logger.warning(f"Failed to calculate fragment mass for {fragment_seq}: {e}")
+            return mass.fast_mass(clean_seq, ion_type=ion_type, charge=charge)
 
     def load_precomputed_index(self, index_file):
         """加载预计算索引"""
@@ -209,16 +362,19 @@ class EfficientReranker:
             if not intensities_data:
                 return None
 
-            # 解析为峰列表
-            mz_list, intensity_list = self._prosit_to_peaks(clean_seq, charge, intensities_data)
+            # 解析为峰列表（传入原始peptide以保留修饰信息）
+            mz_list, intensity_list = self._prosit_to_peaks(peptide, charge, intensities_data)
 
             if len(mz_list) == 0:
                 return None
 
+            # 使用带修饰的质量计算
+            precursor_mz = self.calculate_peptide_mass_with_mods(peptide, charge)
+
             return {
                 'mz': np.array(mz_list),
                 'intensity': np.array(intensity_list),
-                'precursor_mz': mass.calculate_mass(sequence=clean_seq, charge=charge),
+                'precursor_mz': precursor_mz,
                 'charge': charge
             }
         except Exception as e:
@@ -226,20 +382,31 @@ class EfficientReranker:
             return None
 
     def _prosit_to_peaks(self, sequence, charge, intensities):
-        """将Prosit强度转为峰列表"""
+        """
+        将Prosit强度转为峰列表
+        
+        注意：sequence可能包含修饰（如M[UNIMOD:35]PEPTIDE）
+        需要正确处理修饰以计算碎片离子质量
+        """
         mz_list, intensity_list = [], []
-        peptide_len = len(sequence)
+        
+        # 获取不含修饰的序列长度（用于Prosit强度索引）
+        clean_seq = self.normalize_peptide(sequence)
+        peptide_len = len(clean_seq)
         idx = 0
 
         # b ions
         for ion_charge in [1, 2, 3]:
             for pos in range(1, peptide_len):
-                fragment = sequence[:pos]
+                # 从原始序列中提取碎片（保留修饰）
+                fragment = self._extract_fragment_with_mods(sequence, 0, pos, 'b')
+                
                 for mod in ['', '-H2O', '-NH3']:
                     if idx < len(intensities):
                         intensity = intensities[idx]
                         if intensity > 0:
-                            b_mz = mass.fast_mass(fragment, ion_type='b', charge=ion_charge)
+                            # 使用带修饰的质量计算
+                            b_mz = self.calculate_fragment_mass_with_mods(fragment, ion_type='b', charge=ion_charge)
                             if mod == '-H2O':
                                 b_mz -= 18.01056 / ion_charge
                             elif mod == '-NH3':
@@ -251,12 +418,15 @@ class EfficientReranker:
         # y ions
         for ion_charge in [1, 2, 3]:
             for pos in range(1, peptide_len):
-                fragment = sequence[-pos:]
+                # 从原始序列中提取碎片（保留修饰）
+                fragment = self._extract_fragment_with_mods(sequence, peptide_len - pos, peptide_len, 'y')
+                
                 for mod in ['', '-H2O', '-NH3']:
                     if idx < len(intensities):
                         intensity = intensities[idx]
                         if intensity > 0:
-                            y_mz = mass.fast_mass(fragment, ion_type='y', charge=ion_charge)
+                            # 使用带修饰的质量计算
+                            y_mz = self.calculate_fragment_mass_with_mods(fragment, ion_type='y', charge=ion_charge)
                             if mod == '-H2O':
                                 y_mz -= 18.01056 / ion_charge
                             elif mod == '-NH3':
@@ -266,6 +436,53 @@ class EfficientReranker:
                     idx += 1
 
         return mz_list, intensity_list
+    
+    def _extract_fragment_with_mods(self, sequence, start_aa, end_aa, ion_type):
+        """
+        从带修饰的序列中提取碎片（保留修饰）
+        
+        Parameters:
+        -----------
+        sequence : str
+            完整序列（可能包含修饰），如 "M[UNIMOD:35]PEPTIDE" 或 "M(+15.99)PEPTIDE"
+        start_aa : int
+            起始氨基酸位置（不含修饰的索引）
+        end_aa : int
+            结束氨基酸位置（不含修饰的索引）
+        ion_type : str
+            离子类型 ('b' 或 'y')
+        
+        Returns:
+        --------
+        fragment : str
+            碎片序列（保留修饰）
+        """
+        # 解析序列，记录每个氨基酸及其修饰
+        aa_list = []
+        i = 0
+        while i < len(sequence):
+            if i < len(sequence) and sequence[i].isalpha():
+                aa = sequence[i]
+                i += 1
+                
+                # 检查是否有修饰（支持方括号和圆括号）
+                if i < len(sequence) and sequence[i] in '[(':
+                    end_char = ']' if sequence[i] == '[' else ')'
+                    end = sequence.find(end_char, i)
+                    if end != -1:
+                        mod = sequence[i:end+1]
+                        aa_list.append(aa + mod)
+                        i = end + 1
+                    else:
+                        aa_list.append(aa)
+                else:
+                    aa_list.append(aa)
+            else:
+                i += 1
+        
+        # 提取指定范围的碎片
+        fragment = ''.join(aa_list[start_aa:end_aa])
+        return fragment
 
     def rerank_with_efficient_index(
         self,
