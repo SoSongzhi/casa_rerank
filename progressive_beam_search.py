@@ -236,7 +236,62 @@ class ProgressiveBeamSpec2Pep(Spec2Pep):
             
             temp_matches = torch.zeros_like(beam_fits_precursor)
             temp_matches[idx] = matches_any
-            beam_fits_precursor = temp_matches
+            
+            # 决定是否强制终止不匹配的beams
+            still_alive = ~finished_beams[idx]
+            to_terminate = still_alive & ~matches_any
+            
+            # 处理负质量氨基酸可能修正质量的情况
+            if torch.any(to_terminate) and self.neg_mass_idx.numel() > 0:
+                exceeding_indices = torch.where(to_terminate)[0]
+                neg_masses = self.token_masses[self.neg_mass_idx]
+                
+                exceeding_masses = recalc_neutral_masses[exceeding_indices]
+                exceeding_charges = charges_device[exceeding_indices].double()
+                exceeding_precursor_mzs = precursor_mzs_obs[exceeding_indices]
+                
+                # 计算加上负质量氨基酸后的潜在m/z
+                potential_masses = exceeding_masses.unsqueeze(1) + neg_masses.double().unsqueeze(0)
+                potential_mzs = (
+                    potential_masses.unsqueeze(2)
+                    / exceeding_charges.unsqueeze(1).unsqueeze(2)
+                    + 1.007276
+                )
+                
+                isotope_corr_expanded = (
+                    isotope_range.unsqueeze(0).unsqueeze(0)
+                    * 1.00335
+                    / exceeding_charges.unsqueeze(1).unsqueeze(2)
+                )
+                observed_mzs_expanded = (
+                    exceeding_precursor_mzs.unsqueeze(1).unsqueeze(2)
+                    - isotope_corr_expanded
+                )
+                delta_ppms_neg = (
+                    (potential_mzs - observed_mzs_expanded)
+                    / exceeding_precursor_mzs.unsqueeze(1).unsqueeze(2)
+                    * 1e6
+                )
+                
+                any_neg_aa_works = torch.any(
+                    torch.abs(delta_ppms_neg) < self.precursor_mass_tol,
+                    dim=(1, 2),
+                )
+                any_not_strictly_exceeding = torch.any(
+                    delta_ppms_neg <= self.precursor_mass_tol, dim=(1, 2)
+                )
+                
+                # 更新可以被负质量氨基酸"拯救"的beams
+                can_be_saved = any_neg_aa_works | any_not_strictly_exceeding
+                temp_matches[idx[exceeding_indices]] |= can_be_saved
+                to_terminate[exceeding_indices] = ~can_be_saved
+            
+            # 终止确认超出容差的beams
+            to_terminate = idx[to_terminate]
+            finished_beams[to_terminate] = True
+            
+            # 更新beam_fits_precursor（仅对已完成的beams）
+            beam_fits_precursor |= temp_matches & finished_beams
         
         return finished_beams, beam_fits_precursor, discarded_beams
     
