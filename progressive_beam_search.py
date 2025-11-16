@@ -61,88 +61,6 @@ class ProgressiveBeamSpec2Pep(Spec2Pep):
         logger.info(f"渐进Beam Search策略: {self.beam_schedule}")
         logger.info(f"最大beam size: {self.max_beam_size}")
     
-    def calculate_peptide_mass_with_mods(self, tokens, charge=1):
-        """
-        计算带修饰的肽段质量（从token序列）
-        
-        Parameters:
-        -----------
-        tokens : torch.Tensor
-            Token序列 (1D tensor)
-        charge : int
-            电荷态
-        
-        Returns:
-        --------
-        precursor_mz : float
-            前体离子的m/z值
-        """
-        # Unimod ID到质量的映射
-        unimod_masses = {
-            'UNIMOD:35': 15.994915,   # Oxidation (M)
-            'UNIMOD:4': 57.021464,    # Carbamidomethyl (C)
-            'UNIMOD:7': 0.984016,     # Deamidation (N/Q)
-            'UNIMOD:1': 42.010565,    # Acetyl (N-term)
-            'UNIMOD:5': 43.005814,    # Carbamyl (N-term)
-            'UNIMOD:28': -17.026549,  # Gln->pyro-Glu (Q)
-            'UNIMOD:27': -18.010565,  # Glu->pyro-Glu (E)
-            'UNIMOD:385': -17.026549, # Ammonia-loss (N-term)
-            'UNIMOD:21': 79.966331,   # Phospho (S/T/Y)
-            'UNIMOD:34': 14.015650,   # Methyl
-        }
-        
-        # 将tokens转换为肽段序列
-        # 确保tokens是2D的 (batch_size=1, seq_len)
-        if tokens.dim() == 1:
-            tokens = tokens.unsqueeze(0)
-        peptide = self.tokenizer.detokenize(tokens)[0]  # 取第一个结果
-        
-        # 提取氨基酸序列和修饰
-        total_mod_mass = 0.0
-        clean_seq = ""
-        
-        i = 0
-        while i < len(peptide):
-            if peptide[i] in '[(':
-                # 找到修饰的结束位置
-                end_char = ']' if peptide[i] == '[' else ')'
-                end = peptide.find(end_char, i)
-                if end == -1:
-                    break
-                
-                mod_str = peptide[i+1:end]
-                
-                # 解析修饰
-                if mod_str.startswith('UNIMOD:'):
-                    # UNIMOD格式
-                    if mod_str in unimod_masses:
-                        total_mod_mass += unimod_masses[mod_str]
-                else:
-                    # 数值格式: +15.994915 或 15.994915 或 +.98
-                    try:
-                        mod_mass = float(mod_str.replace('+', ''))
-                        total_mod_mass += mod_mass
-                    except ValueError:
-                        pass
-                
-                i = end + 1
-            else:
-                # 普通氨基酸
-                if peptide[i].isalpha():
-                    clean_seq += peptide[i]
-                i += 1
-        
-        # 计算基础肽段质量（不含修饰）
-        try:
-            base_mass = mass.calculate_mass(sequence=clean_seq, charge=0)
-            # 加上修饰质量
-            total_mass = base_mass + total_mod_mass
-            # 计算m/z
-            precursor_mz = (total_mass + charge * 1.007276) / charge
-            return precursor_mz
-        except Exception as e:
-            # 降级到不含修饰的计算
-            return mass.calculate_mass(sequence=clean_seq, charge=charge)
     
     def get_beam_size(self, step):
         """获取指定步骤的beam size"""
@@ -251,22 +169,32 @@ class ProgressiveBeamSpec2Pep(Spec2Pep):
                         if len(seq) > 0:
                             padded_sequences[i, : len(seq)] = seq
                     
-                    # ===== 关键修复：确保设备一致性 =====
-                    # 移到CPU进行tokenizer计算
-                    padded_cpu = padded_sequences.cpu()
-                    charges_cpu = charges_to_check.cpu()
+                    # ===== 手动计算质量，避免tokenizer内部的设备不匹配 =====
+                    # 获取token_masses的CPU副本
+                    token_masses_cpu = self.token_masses.cpu()
+                    charges_cpu = charges_to_check.cpu().long()
                     
-                    # ===== 使用带修饰的质量计算 =====
-                    recalc_mzs = []
-                    for i, seq in enumerate(padded_sequences):
-                        # 计算带修饰的质量
-                        mz = self.calculate_peptide_mass_with_mods(
-                            seq, charge=int(charges_to_check[i].item())
-                        )
-                        recalc_mzs.append(mz)
+                    # 在CPU上计算每个序列的质量
+                    masses_list = []
+                    for seq in padded_sequences:
+                        # 计算序列的总质量（不包含修饰）
+                        seq_cpu = seq.cpu()
+                        valid_tokens = seq_cpu[seq_cpu > 0]  # 过滤padding
+                        if len(valid_tokens) > 0:
+                            seq_mass = token_masses_cpu[valid_tokens].sum().item()
+                        else:
+                            seq_mass = 0.0
+                        masses_list.append(seq_mass)
                     
-                    # 转换为tensor并移到device
-                    recalc_mzs = torch.tensor(recalc_mzs, dtype=torch.float64, device=device)
+                    # 转换为tensor
+                    masses_cpu = torch.tensor(masses_list, dtype=torch.float64, device='cpu')
+                    
+                    # 计算m/z: (mass + charge * proton_mass) / charge
+                    PROTON = 1.007276
+                    recalc_mzs_cpu = (masses_cpu / charges_cpu.double()) + PROTON
+                    
+                    # 移到正确的device
+                    recalc_mzs = recalc_mzs_cpu.to(device)
                     charges_device = charges_to_check.to(device).double()
                     
                     # 计算中性质量 (现在都在同一device上)
