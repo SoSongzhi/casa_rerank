@@ -325,47 +325,98 @@ class EfficientReranker:
                     else:
                         charge = int(charge)
 
+                    # 新增: 推测碎裂类型
+                    fragmentation_type = "HCD"  # 默认HCD.
+
+                    # 尝试从参数中读取
+                    if 'fragmentation' in spec['params']:
+                        frag = spec['params']['fragmentation'].upper()
+                        if 'CID' in frag:
+                            fragmentation_type = "CID"
+                        elif 'HCD' in frag:
+                            fragmentation_type = "HCD"
+                        elif 'ECD' in frag:
+                            fragmentation_type = "ECD"
+                        elif 'EID' in frag:
+                            fragmentation_type = "EID"
+                        elif 'UVPD' in frag:
+                            fragmentation_type = "UVPD"
+                        elif 'ETCID' in frag or 'ETciD' in frag:
+                            fragmentation_type = "ETciD"
+
                     return {
                         'mz': spec['m/z array'],
                         'intensity': spec['intensity array'],
                         'precursor_mz': float(precursor_mz),
-                        'charge': charge
+                        'charge': charge,
+                        'fragmentation_type': fragmentation_type # 新增
                     }
         return None
 
-    def generate_prosit_spectrum(self, peptide, charge, nce=25.0):
-        """使用Prosit生成理论谱图"""
-        clean_seq = self.normalize_peptide(peptide)
+    def generate_prosit_spectrum(self, peptide, charge, fragmentation_type="HCD", query_index=None):
+        """使用 Prosit_2025_intensity_MultiFrag 生成理论谱图"""
 
-        url = f"{self.koina_url}/v2/models/Prosit_2020_intensity_HCD/infer"
+        url = f"{self.koina_url}/v2/models/Prosit_2025_intensity_MultiFrag/infer"
         payload = {
             "id": "prosit_prediction",
             "inputs": [
-                {"name": "peptide_sequences", "shape": [1, 1], "datatype": "BYTES", "data": [clean_seq]},
-                {"name": "precursor_charges", "shape": [1, 1], "datatype": "INT32", "data": [int(charge)]},
-                {"name": "collision_energies", "shape": [1, 1], "datatype": "FP32", "data": [float(nce)]}
+                {
+                    "name": "peptide_sequences",
+                    "shape": [1, 1],
+                    "datatype": "BYTES",
+                    # Prosit 仍然吃带修饰的原始序列
+                    "data": [peptide]
+                },
+                {
+                    "name": "precursor_charges",
+                    "shape": [1, 1],
+                    "datatype": "INT32",
+                    "data": [int(charge)]
+                },
+                {
+                    "name": "fragmentation_types",
+                    "shape": [1, 1],
+                    "datatype": "BYTES",
+                    "data": [fragmentation_type]
+                }
             ]
         }
 
         try:
             response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=30)
             if response.status_code != 200:
+                '''
+                logger.warning(
+                    f"Prosit API returned status {response.status_code} for {peptide}: {response.text}"
+                )
+                '''
                 return None
 
             result = response.json()
-            intensities_data = None
-            for output in result.get('outputs', []):
-                if output.get('name') == 'intensities':
-                    intensities_data = output.get('data', [])
-                    break
 
-            if not intensities_data:
+            # MultiFrag返回3个输出
+            intensities_data = None
+            annotations_data = None
+            mz_data = None
+
+            for output in result.get('outputs', []):
+                output_name = output.get('name')
+                if output_name == 'intensities':
+                    intensities_data = output.get('data', [])
+                elif output_name == 'annotation':
+                    annotations_data = output.get('data', [])
+                elif output_name == 'mz':
+                    mz_data = output.get('data', [])
+
+            if not intensities_data or not mz_data:
+                #logger.warning(f"Missing intensities or mz data from Prosit for {peptide}")
                 return None
 
             # 解析为峰列表（传入原始peptide以保留修饰信息）
             mz_list, intensity_list = self._prosit_to_peaks(peptide, charge, intensities_data)
 
             if len(mz_list) == 0:
+                #logger.warning(f"No valid peaks for {peptide}")
                 return None
 
             # 使用带修饰的质量计算
@@ -565,8 +616,13 @@ class EfficientReranker:
                 })
 
             elif use_prosit:
-                # 使用Prosit生成
-                prosit_spec = self.generate_prosit_spectrum(peptide, query_spec['charge'])
+                # 使用Prosit_2025_MultiFrag生成
+                prosit_spec = self.generate_prosit_spectrum(
+                    peptide,
+                    query_spec['charge'],
+                    fragmentation_type=query_spec.get('fragmentation_type', 'HCD'),
+                    query_index=query_index
+                )
 
                 if prosit_spec:
                     prosit_embedding = self.encode_spectrum_from_arrays(

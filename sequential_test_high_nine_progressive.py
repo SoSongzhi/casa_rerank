@@ -673,7 +673,7 @@ class ProgressiveSequentialProcessor:
 def main():
     """主函数"""
     # 配置路径
-    test_mgf = "test_data/high_nine/high_nine_validation_1000.mgf"
+    test_mgf = "test_data/high_nine/high_nine_validation_10.mgf"
     reference_mgf = "test_data/high_nine/high_nine_database.mgf"
     index_file = f"{reference_mgf}.efficient_index.pkl"
     output_dir = Path("high_nine_results_sequential_progressive")
